@@ -2,8 +2,64 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import asyncio
-from core.scraper import search_audio
+from core.scraper import search_top_tracks
 from core.player import GuildMusicManager
+
+class TrackDropdown(discord.ui.Select):
+    def __init__(self, tracks: list, manager: GuildMusicManager, cog: commands.Cog):
+        self.tracks = tracks
+        self.manager = manager
+        self.cog = cog
+        
+
+        options = []
+        for idx, track in enumerate(tracks):
+
+            title = track['title']
+            if len(title) > 90:
+                title = title[:87] + "..."
+                
+            options.append(discord.SelectOption(
+                label=f"{idx + 1}. {title}",
+                value=str(idx),
+                description=f"Duration: {track['duration'] // 60}m {track['duration'] % 60}s" if track['duration'] else "Unknown duration"
+            ))
+
+        super().__init__(placeholder="Select a song to play...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+
+        await interaction.response.defer()
+        
+
+        selected_idx = int(self.values[0])
+        track = self.tracks[selected_idx]
+        
+
+        manager = await self.cog.ensure_voice(interaction)
+        if not manager:
+            return
+
+
+        manager.add_to_queue(track)
+        
+
+        self.disabled = True
+        await interaction.edit_original_response(view=self.view)
+
+
+        if not manager.voice_client.is_playing() and not manager.voice_client.is_paused():
+            await manager.play_next()
+            await interaction.followup.send(f"🎶 Now playing selection: **{track['title']}**")
+        else:
+            await interaction.followup.send(f"⏳ Added to queue: **{track['title']}** (Position: {len(manager.queue)})")
+
+
+class DropdownView(discord.ui.View):
+    def __init__(self, tracks: list, manager: GuildMusicManager, cog: commands.Cog):
+        super().__init__(timeout=60)
+        self.add_item(TrackDropdown(tracks, manager, cog))
+
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -17,7 +73,11 @@ class Music(commands.Cog):
 
     async def ensure_voice(self, interaction: discord.Interaction):
         if not interaction.user.voice:
-            await interaction.response.send_message("❌ You need to be in a voice channel first!", ephemeral=True)
+
+            try:
+                await interaction.response.send_message("❌ You need to be in a voice channel first!", ephemeral=True)
+            except discord.InteractionResponded:
+                await interaction.followup.send("❌ You need to be in a voice channel first!")
             return None
 
         channel = interaction.user.voice.channel
@@ -32,28 +92,38 @@ class Music(commands.Cog):
         manager.voice_client = voice_client
         return manager
 
-    @app_commands.command(name="play", description="Play or queue a track instantly")
+    @app_commands.command(name="play", description="Search for music and choose from top 10 results")
     async def play(self, interaction: discord.Interaction, query: str):
-
         await interaction.response.defer()
         
-        manager = await self.ensure_voice(interaction)
-        if not manager:
+
+        if not interaction.user.voice:
+            await interaction.followup.send("❌ You need to be in a voice channel first!")
             return
+            
+        manager = self.get_manager(interaction.guild_id)
 
         try:
 
-            track = await asyncio.to_thread(search_audio, query)
+            tracks = await asyncio.to_thread(search_top_tracks, query, 10)
             
-            manager.add_to_queue(track)
 
-            if not manager.voice_client.is_playing() and not manager.voice_client.is_paused():
-                await manager.play_next()
-                await interaction.followup.send(f"🎶 Now playing: **{track['title']}**")
-            else:
-                await interaction.followup.send(f"⏳ Added to queue: **{track['title']}** (Position: {len(manager.queue)})")
+            embed = discord.Embed(
+                title=f"🔍 Search Results for: {query}", 
+                description="Select your track from the dropdown menu below.",
+                color=discord.Color.blue()
+            )
+            
+            for idx, track in enumerate(tracks):
+                duration_str = f"{track['duration'] // 60}m {track['duration'] % 60}s" if track['duration'] else "Unknown"
+                embed.add_field(name=f"{idx + 1}. {track['title']}", value=f"Duration: {duration_str}", inline=False)
+
+
+            view = DropdownView(tracks, manager, self)
+            await interaction.followup.send(embed=embed, view=view)
+            
         except Exception as e:
-            await interaction.followup.send(f"❌ Playback/Scraping error: {e}")
+            await interaction.followup.send(f"❌ Scraping error: {e}")
 
     @app_commands.command(name="pause", description="Pause the currently playing track")
     async def pause(self, interaction: discord.Interaction):
@@ -83,7 +153,6 @@ class Music(commands.Cog):
     @app_commands.command(name="queue", description="Show the upcoming tracks")
     async def queue(self, interaction: discord.Interaction):
         manager = self.get_manager(interaction.guild_id)
-        
         embed = discord.Embed(title="📋 Current Queue", color=discord.Color.blurple())
         
         if manager.current:

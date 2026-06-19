@@ -14,10 +14,7 @@ class GuildMusicManager:
         """Plays the next song in the queue."""
         if len(self.queue) == 0:
             self.current = None
-
             return
-
-
         self.current = self.queue.pop(0)
         
         ffmpeg_options = {
